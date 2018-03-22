@@ -20,11 +20,13 @@ import tornado.ioloop
 import tornado.web
 import os.path
 import uuid
+import aioredis
 
 from tornado.concurrent import Future
 from tornado.options import define, options, parse_command_line
 
 define("port", default=8000, help="run on the given port", type=int)
+define("redis", default="redis://redis", help="redis URL")
 define("debug", default=False, help="run in debug mode")
 
 
@@ -33,6 +35,12 @@ class MessageBuffer(object):
         self.waiters = set()
         self.cache = []
         self.cache_size = 200
+
+    def init_redis(self):
+        async def redis_init():
+            return await aioredis.create_redis_pool(options.redis)
+        self.redis =  tornado.ioloop.IOLoop.current().run_sync(redis_init)
+        tornado.ioloop.IOLoop.current().add_callback(self.redis_listener)
 
     def wait_for_messages(self, cursor=None):
         # Construct a Future to return to our caller.  This allows
@@ -57,8 +65,18 @@ class MessageBuffer(object):
         # Set an empty result to unblock any coroutines waiting.
         future.set_result([])
 
-    def new_messages(self, messages):
+    async def new_messages(self, messages):
         logging.info("Sending new message to %r listeners", len(self.waiters))
+        await self.redis.publish('scalable_chat', tornado.escape.json_encode({'messages': messages}))
+
+    async def redis_listener(self):
+        ch, = await self.redis.subscribe('scalable_chat')
+        while await ch.wait_message():
+            messages = await ch.get()
+            messages = tornado.escape.json_decode(messages)
+            self.messages_new(messages['messages'])
+
+    def messages_new(self, messages):
         for future in self.waiters:
             future.set_result(messages)
         self.waiters = set()
@@ -77,7 +95,7 @@ class MainHandler(tornado.web.RequestHandler):
 
 
 class MessageNewHandler(tornado.web.RequestHandler):
-    def post(self):
+    async def post(self):
         message = {
             "id": str(uuid.uuid4()),
             "body": self.get_argument("body"),
@@ -90,7 +108,7 @@ class MessageNewHandler(tornado.web.RequestHandler):
             self.redirect(self.get_argument("next"))
         else:
             self.write(message)
-        global_message_buffer.new_messages([message])
+        await global_message_buffer.new_messages([message])
 
 
 class MessageUpdatesHandler(tornado.web.RequestHandler):
@@ -111,6 +129,7 @@ class MessageUpdatesHandler(tornado.web.RequestHandler):
 
 def main():
     parse_command_line()
+    global_message_buffer.init_redis()
     app = tornado.web.Application(
         [
             (r"/", MainHandler),

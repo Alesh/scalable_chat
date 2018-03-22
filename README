@@ -1,0 +1,6 @@
+
+Run command "docker-compose up", it starts the redis and
+first instance of chat server on localhost:8000. Then run
+command "python server.py --port=9000 --redis=redis://localhost"
+in other console, it starts second instance of chat server
+on localhost:9000
